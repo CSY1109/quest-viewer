@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quest Splat Viewer</title>
+<style>
+  body { margin: 0; background: #000; font-family: sans-serif; color: #fff; }
+  canvas { display: block; touch-action: none; }
+  #panel {
+    position: fixed; top: 12px; left: 12px; z-index: 10;
+    background: rgba(20, 20, 20, 0.85); padding: 14px 16px; border-radius: 10px;
+    width: 330px; font-size: 16px; line-height: 1.4;
+  }
+  #panel h3 { margin: 0 0 6px; font-size: 18px; }
+  #panel label { display: block; margin-top: 10px; }
+  #panel input[type=range] { width: 100%; }
+  #status { margin-top: 10px; color: #8fd3ff; }
+  .hint { font-size: 13px; color: #bbb; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <h3>Quest Splat Viewer</h3>
+  <label>1. Choose your .ply file<br><input type="file" id="file" accept=".ply,.spz,.splat"></label>
+  <div id="status">No file loaded yet.</div>
+
+  <label>Rotate X: <span id="rx_v">180</span>°<input type="range" id="rx" min="-180" max="180" step="5" value="180"></label>
+  <label>Rotate Y: <span id="ry_v">0</span>°<input type="range" id="ry" min="-180" max="180" step="5" value="0"></label>
+  <label>Rotate Z: <span id="rz_v">0</span>°<input type="range" id="rz" min="-180" max="180" step="5" value="0"></label>
+  <label>Scale: <span id="sc_v">1.00</span>×<input type="range" id="sc" min="-1.5" max="1.5" step="0.05" value="0"></label>
+  <label>Move up/down: <span id="up_v">0.0</span> m<input type="range" id="up" min="-3" max="3" step="0.1" value="0"></label>
+
+  <div class="hint">
+    2. Fix the orientation here first (the room should look upright).<br>
+    3. Press <b>Enter VR</b> at the bottom of the screen.<br>
+    Preview: drag to look, W/A/S/D to move.
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+    "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.3.1/spark.module.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from "three";
+import { SparkRenderer, SplatMesh, SparkControls, SparkXr } from "@sparkjsdev/spark";
+
+// ---------- Basic scene ----------
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// The camera lives inside a "local frame" (same pattern as Spark's WebXR example)
+const localFrame = new THREE.Group();
+scene.add(localFrame);
+const spark = new SparkRenderer({ renderer, maxStdDev: Math.sqrt(5) }); // a bit faster on Quest
+localFrame.add(spark);
+localFrame.add(camera);
+
+// Adds the "Enter VR" button
+const xr = new SparkXr({ renderer, mode: "vr" });
+
+// Mouse/keyboard controls for the 2D preview
+const controls = new SparkControls({ canvas: renderer.domElement });
+
+// ---------- Loading the PLY ----------
+const statusEl = document.getElementById("status");
+let mesh = null;
+let centroid = new THREE.Vector3();
+
+document.getElementById("file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    statusEl.textContent = `Reading ${file.name} (${(file.size / 1e6).toFixed(0)} MB)...`;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+
+    statusEl.textContent = "Decoding splats...";
+    if (mesh) { scene.remove(mesh); mesh.dispose?.(); }
+    mesh = new SplatMesh({ fileBytes: bytes, fileName: file.name });
+    await mesh.initialized;
+
+    // Centre of the scene, so you start standing in the middle of the room
+    const sum = new THREE.Vector3();
+    let n = 0;
+    try {
+      mesh.forEachSplat((i, center) => { sum.add(center); n++; });
+    } catch (err) { console.warn("Could not compute centre", err); }
+    centroid = n ? sum.divideScalar(n) : new THREE.Vector3();
+
+    scene.add(mesh);
+    applyTransform();
+    statusEl.textContent = `Loaded ${n ? n.toLocaleString() + " splats" : file.name}. Fix orientation, then Enter VR.`;
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = "Failed to load: " + err.message;
+  }
+});
+
+// ---------- Orientation / scale sliders ----------
+const ids = ["rx", "ry", "rz", "sc", "up"];
+ids.forEach(id => document.getElementById(id).addEventListener("input", applyTransform));
+
+function val(id) { return parseFloat(document.getElementById(id).value); }
+
+function applyTransform() {
+  const deg = THREE.MathUtils.degToRad;
+  const s = Math.pow(10, val("sc"));          // slider is log scale: 0.03x .. 30x
+  document.getElementById("rx_v").textContent = val("rx");
+  document.getElementById("ry_v").textContent = val("ry");
+  document.getElementById("rz_v").textContent = val("rz");
+  document.getElementById("sc_v").textContent = s.toFixed(2);
+  document.getElementById("up_v").textContent = val("up").toFixed(1);
+  if (!mesh) return;
+
+  mesh.rotation.set(deg(val("rx")), deg(val("ry")), deg(val("rz")));
+  mesh.scale.setScalar(s);
+  // Put the scene centre at the viewer's starting point, then shift up/down
+  const c = centroid.clone().multiplyScalar(s).applyEuler(mesh.rotation);
+  mesh.position.set(-c.x, -c.y + val("up"), -c.z);
+}
+
+// ---------- Render loop ----------
+let lastCameraPos = new THREE.Vector3();
+renderer.setAnimationLoop((time, xrFrame) => {
+  if (!xrFrame) controls.update(localFrame);
+  // Quest fix from Spark's WebXR example: when the headset pose jumps on entering VR,
+  // shift the local frame so you start where the preview camera was.
+  if (lastCameraPos.distanceTo(camera.position) > 0.5) {
+    localFrame.position.copy(camera.position).multiplyScalar(-1);
+  }
+  lastCameraPos.copy(camera.position);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
